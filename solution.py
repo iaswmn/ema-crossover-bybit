@@ -14,6 +14,7 @@ import asyncio
 from dataclasses import dataclass
 
 import httpx
+import numpy as np
 import pandas as pd
 
 # --- Exchange / data settings -------------------------------------------------
@@ -156,3 +157,65 @@ def clean_klines(rows: list[list[str]], server_ms: int) -> tuple[pd.DataFrame, C
         final=len(df),
     )
     return df, report
+
+
+# --- Indicators (Pine Script v5 semantics) -----------------------------------
+FAST_LENGTH = 9
+SLOW_LENGTH = 21
+
+
+def pine_ema(src: np.ndarray, length: int) -> np.ndarray:
+    """Reproduce Pine's ``ta.ema(src, length)``.
+
+    * alpha = 2 / (length + 1);
+    * the first ``length - 1`` values are ``na``;
+    * the first value is seeded with the SMA of the first ``length`` sources,
+      then ``ema = alpha * src + (1 - alpha) * ema[1]``.
+
+    ``pandas.ewm(adjust=False)`` is NOT equivalent: it seeds with the first
+    source value and has no ``na`` warm-up, which shifts early crossovers.
+    """
+    out = np.full(len(src), np.nan)
+    if length <= 0 or len(src) < length:
+        return out
+    alpha = 2.0 / (length + 1)
+    out[length - 1] = src[:length].mean()
+    for i in range(length, len(src)):
+        out[i] = alpha * src[i] + (1.0 - alpha) * out[i - 1]
+    return out
+
+
+def _previous(values: np.ndarray) -> np.ndarray:
+    """Pine's ``x[1]``: the series shifted by one bar, ``na`` on the first bar."""
+    return np.concatenate([[np.nan], values[:-1]])
+
+
+def crossover(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Pine's ``ta.crossover``: ``a > b`` now and ``a <= b`` on the previous bar.
+
+    Comparisons with ``na`` are false, so there is no signal during warm-up.
+    """
+    with np.errstate(invalid="ignore"):
+        return (a > b) & (_previous(a) <= _previous(b))
+
+
+def crossunder(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Pine's ``ta.crossunder``: ``a < b`` now and ``a >= b`` on the previous bar."""
+    with np.errstate(invalid="ignore"):
+        return (a < b) & (_previous(a) >= _previous(b))
+
+
+def compute_signals(df: pd.DataFrame, fast: int = FAST_LENGTH, slow: int = SLOW_LENGTH) -> pd.DataFrame:
+    """Return a new frame with both EMAs and buy / sell signals per bar close."""
+    close = df["close"].to_numpy(dtype=float)
+    ema_fast = pine_ema(close, fast)
+    ema_slow = pine_ema(close, slow)
+    return pd.DataFrame(
+        {
+            "ema_fast": ema_fast,
+            "ema_slow": ema_slow,
+            "buy": crossover(ema_fast, ema_slow),
+            "sell": crossunder(ema_fast, ema_slow),
+        },
+        index=df.index,
+    )
