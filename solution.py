@@ -113,7 +113,7 @@ def clean_klines(rows: list[list[str]], server_ms: int) -> tuple[pd.DataFrame, C
     """Turn raw Bybit rows into a clean, ascending OHLC frame.
 
     What is done and why:
-    * Unparseable rows (not a list, wrong length, non-numeric fields) are
+    * Unparseable rows (not a list, wrong length, non-numeric or infinite fields) are
       dropped: there is no way to trust or repair them.
     * Broken bars are dropped: non-positive prices, high < low, open/close
       outside [low, high], or a start time not on a minute boundary. This runs
@@ -137,6 +137,8 @@ def clean_klines(rows: list[list[str]], server_ms: int) -> tuple[pd.DataFrame, C
     ]
     df = pd.DataFrame(well_formed, columns=KLINE_COLUMNS)
     df = df.apply(pd.to_numeric, errors="coerce")
+    # "inf" parses as a number but cannot be a time or a price; treat it as unparseable.
+    df = df.replace([np.inf, -np.inf], np.nan)
     df = df.dropna(subset=["start_ms", *PRICE_COLUMNS])
     unparseable = raw - len(df)
     df = df.astype({"start_ms": "int64"})

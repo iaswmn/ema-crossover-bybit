@@ -33,6 +33,13 @@ class TestCleanKlines:
         assert len(df) == 2
         assert df.iloc[-1]["close"] == pytest.approx(100.9)
 
+    def test_drops_rows_with_infinite_fields_as_unparseable(self):
+        inf_time = ["inf", "100", "101", "99", "100.5", "1.0", "100.0"]
+        inf_price = kline(1, h=float("inf"))
+        df, report = clean_klines([inf_time, inf_price, kline(0)], closed_server_time(1))
+        assert report.unparseable == 2
+        assert list(df["start_ms"]) == [T0]
+
     def test_broken_copy_does_not_shadow_valid_duplicate(self):
         broken_copy = kline(1, o=0.0, h=0.0, low=0.0, c=0.0)
         df, report = clean_klines([broken_copy, kline(1), kline(0)], closed_server_time(1))
