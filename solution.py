@@ -11,6 +11,7 @@ Run: ``python solution.py``
 from __future__ import annotations
 
 import asyncio
+import math
 from dataclasses import dataclass
 
 import httpx
@@ -248,6 +249,19 @@ POSITION_USDT = 1000.0
 ENTRY_FEE_RATE = 0.001  # 0.1% of the entry notional
 EXIT_FEE_RATE = 0.0018  # 0.18% of the exit notional
 SLIPPAGE_WARN_PCT = 0.5
+WARMUP_TOLERANCE = 1e-3  # residual weight of the EMA seed considered negligible
+
+
+def warmup_bars(length: int, tolerance: float = WARMUP_TOLERANCE) -> int:
+    """Index of the first bar where the EMA no longer depends on its seed.
+
+    TradingView computes the EMA over the whole chart history, we only have
+    1000 bars and seed with an SMA. The seed's weight decays as
+    ``(1 - alpha) ** n``; until it drops below ``tolerance`` our EMA can still
+    differ from the chart, so signals in that zone are flagged.
+    """
+    alpha = 2.0 / (length + 1)
+    return (length - 1) + math.ceil(math.log(tolerance) / math.log(1.0 - alpha))
 
 
 @dataclass(frozen=True)
@@ -262,6 +276,7 @@ class Trade:
     net_pnl_pct: float
     entry_slippage_pct: float
     exit_slippage_pct: float
+    in_warmup: bool = False  # entry signal came before the EMA warm-up ended
 
     @property
     def forced_close(self) -> bool:
@@ -283,6 +298,7 @@ class _OpenPosition:
     entry_time: pd.Timestamp
     entry_price: float
     signal_close: float
+    signal_index: int
 
 
 def _slippage_pct(executed: float, signal_close: float) -> float:
@@ -302,7 +318,13 @@ def _net_pnl(entry_price: float, exit_price: float) -> tuple[float, float]:
     return pnl, pnl / POSITION_USDT * 100.0
 
 
-def _close(position: _OpenPosition, exit_time, exit_price: float, signal_close: float | None) -> Trade:
+def _close(
+    position: _OpenPosition,
+    exit_time: pd.Timestamp,
+    exit_price: float,
+    signal_close: float | None,
+    warmup: int,
+) -> Trade:
     pnl_usdt, pnl_pct = _net_pnl(position.entry_price, exit_price)
     return Trade(
         entry_time=position.entry_time,
@@ -315,16 +337,18 @@ def _close(position: _OpenPosition, exit_time, exit_price: float, signal_close: 
         net_pnl_pct=pnl_pct,
         entry_slippage_pct=_slippage_pct(position.entry_price, position.signal_close),
         exit_slippage_pct=0.0 if signal_close is None else _slippage_pct(exit_price, signal_close),
+        in_warmup=position.signal_index < warmup,
     )
 
 
-def backtest(bars: pd.DataFrame, signals: pd.DataFrame) -> BacktestResult:
+def backtest(bars: pd.DataFrame, signals: pd.DataFrame, warmup: int = 0) -> BacktestResult:
     """Long-only spot backtest without look-ahead.
 
     A signal is known only after bar T closes, so the order fills at the OPEN
     of bar T+1 (the next real bar if there is a gap). A signal on the very last
     bar cannot be executed and is counted separately. A position still open at
-    the end of data is force-closed at the last close.
+    the end of data is force-closed at the last close. Trades whose entry
+    signal is on a bar before ``warmup`` are flagged as ``in_warmup``.
     """
     times = bars["time"].tolist()
     opens = bars["open"].to_numpy(dtype=float)
@@ -345,14 +369,14 @@ def backtest(bars: pd.DataFrame, signals: pd.DataFrame) -> BacktestResult:
             unexecuted += 1
             continue
         if wants_entry:
-            position = _OpenPosition(times[i + 1], opens[i + 1], closes[i])
+            position = _OpenPosition(times[i + 1], opens[i + 1], closes[i], i)
         else:
-            trades = [*trades, _close(position, times[i + 1], opens[i + 1], closes[i])]
+            trades = [*trades, _close(position, times[i + 1], opens[i + 1], closes[i], warmup)]
             position = None
 
     if position is not None:
         close_time = times[last] + pd.Timedelta(milliseconds=BAR_MS)
-        trades = [*trades, _close(position, close_time, closes[last], None)]
+        trades = [*trades, _close(position, close_time, closes[last], None, warmup)]
     return BacktestResult(trades=trades, unexecuted_signals=unexecuted)
 
 
@@ -414,7 +438,10 @@ def format_trades(trades: list[Trade]) -> str:
     lines = ["=== Closed trades ==="]
     if not trades:
         return "\n".join([*lines, "No trades."])
-    header = f"{'#':>3}  {'Entry time':<20} {'Entry':>10}  {'Exit time':<20} {'Exit':>10} {'PnL %':>8} {'PnL USDT':>9}  Notes"
+    header = (
+        f"{'#':>3}  {'Entry time':<20} {'Entry':>10}  {'Exit time':<20} {'Exit':>10} "
+        f"{'PnL %':>8} {'PnL USDT':>9}  Notes"
+    )
     lines.append(header)
     for n, t in enumerate(trades, start=1):
         notes = []
@@ -422,6 +449,8 @@ def format_trades(trades: list[Trade]) -> str:
             notes.append("SLIPPAGE")
         if t.forced_close:
             notes.append("forced close at last price")
+        if t.in_warmup:
+            notes.append("EMA warm-up")
         lines.append(
             f"{n:>3}  {_fmt_time(t.entry_time):<20} {t.entry_price:>10.2f}  "
             f"{_fmt_time(t.exit_time):<20} {t.exit_price:>10.2f} "
@@ -430,7 +459,7 @@ def format_trades(trades: list[Trade]) -> str:
     return "\n".join(lines)
 
 
-def format_stats(stats: Stats, unexecuted_signals: int) -> str:
+def format_stats(stats: Stats, unexecuted_signals: int, warmup_trades: int = 0, warmup: int = 0) -> str:
     lines = [
         "=== Summary ===",
         f"Trades:        {stats.trades}",
@@ -439,6 +468,11 @@ def format_stats(stats: Stats, unexecuted_signals: int) -> str:
     ]
     if unexecuted_signals:
         lines.append(f"Signals on the last bar not executed (no next open): {unexecuted_signals}")
+    if warmup_trades:
+        lines.append(
+            f"Trades with entry signal in EMA warm-up (first {warmup} bars, may differ "
+            f"from TradingView): {warmup_trades}"
+        )
     return "\n".join(lines)
 
 
@@ -454,7 +488,8 @@ async def run() -> int:
         return 1
 
     signals = compute_signals(bars)
-    result = backtest(bars, signals)
+    warmup = warmup_bars(SLOW_LENGTH)
+    result = backtest(bars, signals, warmup=warmup)
 
     warnings = format_slippage_warnings(result.trades)
     if warnings:
@@ -463,7 +498,8 @@ async def run() -> int:
     print()
     print(format_trades(result.trades))
     print()
-    print(format_stats(summarize(result.trades), result.unexecuted_signals))
+    warmup_trades = sum(1 for t in result.trades if t.in_warmup)
+    print(format_stats(summarize(result.trades), result.unexecuted_signals, warmup_trades, warmup))
     return 0
 
 

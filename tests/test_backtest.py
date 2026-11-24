@@ -3,7 +3,7 @@
 import pandas as pd
 import pytest
 
-from solution import BAR_MS, backtest, summarize
+from solution import BAR_MS, backtest, format_trades, summarize, warmup_bars
 
 T0 = 1_700_000_040_000
 
@@ -100,3 +100,21 @@ class TestSummarize:
         assert stats.trades == 0
         assert stats.winrate_pct == 0.0
         assert stats.total_pnl_usdt == 0.0
+
+
+class TestWarmup:
+    def test_warmup_bars_until_seed_error_below_threshold(self):
+        # (1 - 2/22)^n <= 1e-3 -> n = 73 bars after the seed bar (index 20)
+        assert warmup_bars(21) == 20 + 73
+
+    def test_flags_trades_with_signal_inside_warmup(self):
+        bars = make_bars(opens=[100] * 8, closes=[100] * 8)
+        result = backtest(bars, make_signals(8, buys={1, 5}, sells={3, 6}), warmup=4)
+        first, second = result.trades
+        assert first.in_warmup  # entry signal on bar 1 < 4
+        assert not second.in_warmup  # signals on bars 5 and 6
+
+    def test_warmup_flag_shown_in_report(self):
+        bars = make_bars(opens=[100] * 4, closes=[100] * 4)
+        result = backtest(bars, make_signals(4, buys={0}, sells={1}), warmup=2)
+        assert "EMA warm-up" in format_trades(result.trades)
