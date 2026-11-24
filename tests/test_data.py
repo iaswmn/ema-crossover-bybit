@@ -55,6 +55,12 @@ class TestCleanKlines:
         assert report.unparseable == 2
         assert len(df) == 2
 
+    def test_drops_rows_that_are_not_lists(self):
+        rows = [kline(2), None, "1700000100000,1,1,1,1,1,1", {"a": 1}, kline(0)]
+        df, report = clean_klines(rows, closed_server_time(2))
+        assert report.unparseable == 3
+        assert len(df) == 2
+
     def test_drops_unclosed_current_bar(self):
         rows = [kline(2), kline(1), kline(0)]
         server_ms = T0 + 2 * BAR_MS + 30_000  # bar 2 is still forming
@@ -113,6 +119,38 @@ class TestFetchKlines:
                 await fetch_klines(client, retries=1)
 
         with pytest.raises(BybitApiError, match="bad symbol"):
+            asyncio.run(go())
+
+    def test_non_json_body_raises_api_error(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text="<html>blocked</html>")
+
+        async def go():
+            async with _client(handler) as client:
+                await fetch_klines(client, retries=1)
+
+        with pytest.raises(BybitApiError, match="not valid JSON"):
+            asyncio.run(go())
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            [1, 2, 3],
+            {"retCode": 0, "result": {"list": None}, "time": 1},
+            {"retCode": 0, "result": {"list": "oops"}, "time": 1},
+            {"retCode": 0, "result": None, "time": 1},
+            {"retCode": 0, "result": {"list": []}},
+        ],
+    )
+    def test_malformed_payload_raises_api_error(self, body):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=body)
+
+        async def go():
+            async with _client(handler) as client:
+                await fetch_klines(client, retries=1)
+
+        with pytest.raises(BybitApiError):
             asyncio.run(go())
 
     def test_retries_transient_http_errors(self):

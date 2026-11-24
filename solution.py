@@ -54,7 +54,7 @@ async def fetch_klines(
         try:
             response = await client.get(BYBIT_KLINE_URL, params=params, timeout=REQUEST_TIMEOUT_S)
             response.raise_for_status()
-            return _parse_kline_payload(response.json())
+            return _parse_kline_payload(_decode_json(response))
         except httpx.HTTPStatusError as exc:
             if not _is_retryable_status(exc.response.status_code):
                 raise
@@ -70,7 +70,19 @@ def _is_retryable_status(status: int) -> bool:
     return status == 429 or status >= 500
 
 
-def _parse_kline_payload(payload: dict) -> tuple[list[list[str]], int]:
+def _decode_json(response: httpx.Response) -> object:
+    """Decode the body; a 200 with an HTML page (e.g. a WAF block) is an API error."""
+    try:
+        return response.json()
+    except ValueError as exc:
+        snippet = response.text[:80].replace("\n", " ")
+        raise BybitApiError(f"Bybit response is not valid JSON: {snippet!r}") from exc
+
+
+def _parse_kline_payload(payload: object) -> tuple[list, int]:
+    """Validate the envelope; individual rows are validated by ``clean_klines``."""
+    if not isinstance(payload, dict):
+        raise BybitApiError(f"Unexpected Bybit payload type: {type(payload).__name__}")
     if payload.get("retCode") != 0:
         raise BybitApiError(f"Bybit error {payload.get('retCode')}: {payload.get('retMsg')}")
     try:
@@ -78,6 +90,8 @@ def _parse_kline_payload(payload: dict) -> tuple[list[list[str]], int]:
         server_ms = int(payload["time"])
     except (KeyError, TypeError, ValueError) as exc:
         raise BybitApiError(f"Unexpected Bybit payload: {exc!r}") from exc
+    if not isinstance(rows, list):
+        raise BybitApiError(f"Unexpected Bybit payload: result.list is {type(rows).__name__}")
     return rows, server_ms
 
 
@@ -113,7 +127,11 @@ def clean_klines(rows: list[list[str]], server_ms: int) -> tuple[pd.DataFrame, C
       diverge from the chart. Execution simply happens on the next real bar.
     """
     raw = len(rows)
-    well_formed = [list(r[: len(KLINE_COLUMNS)]) for r in rows if len(r) >= len(KLINE_COLUMNS)]
+    well_formed = [
+        list(r[: len(KLINE_COLUMNS)])
+        for r in rows
+        if isinstance(r, (list, tuple)) and len(r) >= len(KLINE_COLUMNS)
+    ]
     df = pd.DataFrame(well_formed, columns=KLINE_COLUMNS)
     df = df.apply(pd.to_numeric, errors="coerce")
     df = df.dropna(subset=["start_ms", *PRICE_COLUMNS])
