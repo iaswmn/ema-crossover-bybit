@@ -350,3 +350,108 @@ def summarize(trades: list[Trade]) -> Stats:
         winrate_pct=wins / len(trades) * 100.0 if trades else 0.0,
         total_pnl_usdt=sum(t.net_pnl_usdt for t in trades),
     )
+
+
+# --- Console report -----------------------------------------------------------
+def _fmt_time(ts: pd.Timestamp) -> str:
+    return ts.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def format_cleaning(report: CleaningReport) -> str:
+    return "\n".join(
+        [
+            "=== Data cleaning ===",
+            f"Received bars:          {report.raw}",
+            f"Unparseable removed:    {report.unparseable}",
+            f"Duplicates removed:     {report.duplicates}",
+            f"Broken bars removed:    {report.broken}",
+            f"Unclosed bar removed:   {report.unclosed}",
+            f"Gaps (not filled):      {report.gaps} ({report.missing_minutes} missing minutes)",
+            f"Bars used:              {report.final}",
+        ]
+    )
+
+
+def format_slippage_warnings(trades: list[Trade]) -> list[str]:
+    warnings = []
+    for t in trades:
+        if abs(t.entry_slippage_pct) > SLIPPAGE_WARN_PCT:
+            warnings.append(
+                f"WARNING: entry slippage {t.entry_slippage_pct:+.2f}% at {_fmt_time(t.entry_time)} "
+                f"(signal close {t.signal_entry_close:.2f}, filled {t.entry_price:.2f})"
+            )
+        if abs(t.exit_slippage_pct) > SLIPPAGE_WARN_PCT:
+            warnings.append(
+                f"WARNING: exit slippage {t.exit_slippage_pct:+.2f}% at {_fmt_time(t.exit_time)} "
+                f"(signal close {t.signal_exit_close:.2f}, filled {t.exit_price:.2f})"
+            )
+    return warnings
+
+
+def format_trades(trades: list[Trade]) -> str:
+    lines = ["=== Closed trades ==="]
+    if not trades:
+        return "\n".join([*lines, "No trades."])
+    header = f"{'#':>3}  {'Entry time':<20} {'Entry':>10}  {'Exit time':<20} {'Exit':>10} {'PnL %':>8} {'PnL USDT':>9}  Notes"
+    lines.append(header)
+    for n, t in enumerate(trades, start=1):
+        notes = []
+        if t.has_slippage:
+            notes.append("SLIPPAGE")
+        if t.forced_close:
+            notes.append("forced close at last price")
+        lines.append(
+            f"{n:>3}  {_fmt_time(t.entry_time):<20} {t.entry_price:>10.2f}  "
+            f"{_fmt_time(t.exit_time):<20} {t.exit_price:>10.2f} "
+            f"{t.net_pnl_pct:>+7.3f}% {t.net_pnl_usdt:>+9.2f}  {', '.join(notes)}"
+        )
+    return "\n".join(lines)
+
+
+def format_stats(stats: Stats, unexecuted_signals: int) -> str:
+    lines = [
+        "=== Summary ===",
+        f"Trades:        {stats.trades}",
+        f"Winrate:       {stats.winrate_pct:.1f}% ({stats.wins}/{stats.trades})",
+        f"Total net PnL: {stats.total_pnl_usdt:+.2f} USDT",
+    ]
+    if unexecuted_signals:
+        lines.append(f"Signals on the last bar not executed (no next open): {unexecuted_signals}")
+    return "\n".join(lines)
+
+
+# --- Entry point --------------------------------------------------------------
+async def run() -> int:
+    async with httpx.AsyncClient() as client:
+        rows, server_ms = await fetch_klines(client)
+
+    bars, cleaning = clean_klines(rows, server_ms)
+    print(format_cleaning(cleaning))
+    if len(bars) <= SLOW_LENGTH:
+        print(f"\nNot enough clean bars for EMA({SLOW_LENGTH}): {len(bars)}")
+        return 1
+
+    signals = compute_signals(bars)
+    result = backtest(bars, signals)
+
+    warnings = format_slippage_warnings(result.trades)
+    if warnings:
+        print()
+        print("\n".join(warnings))
+    print()
+    print(format_trades(result.trades))
+    print()
+    print(format_stats(summarize(result.trades), result.unexecuted_signals))
+    return 0
+
+
+def main() -> int:
+    try:
+        return asyncio.run(run())
+    except (httpx.HTTPError, BybitApiError) as exc:
+        print(f"Failed to load data from Bybit: {exc}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
