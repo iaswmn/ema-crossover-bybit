@@ -76,3 +76,19 @@ ruff check . && ruff format --check .
 5. **Время.** Всё выводится в UTC. На графике TradingView нужно выставить тот же часовой пояс, иначе время сигналов кажется сдвинутым.
 
 Для сверки: откройте `BYBIT:BTCUSDT` на таймфрейме 1m, добавьте исходный Pine-скрипт, часовой пояс UTC, и сравните время сделок (сигнальный бар = время входа минус 1 минута).
+
+## Сверка с TradingView
+
+`tools/compare_tradingview.py` сравнивает решение с выгрузкой графика TradingView.
+
+1. График `BYBIT:BTCUSDT`, 1m. К исходному скрипту добавлены строки:
+   ```pine
+   plot(emaFast, "emaFast")
+   plot(emaSlow, "emaSlow")
+   plot(buySignal ? 1 : 0, "buy", display = display.data_window)
+   plot(sellSignal ? 1 : 0, "sell", display = display.data_window)
+   ```
+2. Export chart data, формат времени UNIX timestamp.
+3. `python tools/compare_tradingview.py export.csv`
+
+Скрипт проверяет: `pine_ema` на closes TradingView против его EMA (заодно старт от SMA и `na`-разгон), `crossover`/`crossunder` на EMA TradingView против его сигналов, и полный конвейер на том же окне из Bybit REST бар-в-бар с разбивкой на разгон и остальное.

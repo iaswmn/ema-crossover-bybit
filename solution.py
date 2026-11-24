@@ -43,13 +43,18 @@ async def fetch_klines(
     symbol: str = SYMBOL,
     retries: int = RETRIES,
     backoff_s: float = BACKOFF_S,
+    end_ms: int | None = None,
 ) -> tuple[list[list[str]], int]:
     """Fetch raw klines and the exchange server time (ms) in one request.
 
+    ``end_ms`` (optional) fetches the window ending at that time instead of the
+    latest one; it is used to align with an exported TradingView chart.
     Transient failures (network errors, 5xx, 429) are retried with exponential
     backoff; an API-level error (``retCode != 0``) fails immediately.
     """
     params = {"category": CATEGORY, "symbol": symbol, "interval": INTERVAL, "limit": LIMIT}
+    if end_ms is not None:
+        params["end"] = end_ms
     last_error: Exception | None = None
     for attempt in range(retries):
         try:
