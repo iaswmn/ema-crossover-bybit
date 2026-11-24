@@ -19,6 +19,7 @@ python solution.py
 ```bash
 pip install -r requirements-dev.txt
 pytest -q --cov=solution
+ruff check . && ruff format --check .
 ```
 
 Скрипт выводит в консоль:

@@ -15,8 +15,8 @@ def make_bars(opens, closes):
             "start_ms": [T0 + i * BAR_MS for i in range(n)],
             "time": pd.to_datetime([T0 + i * BAR_MS for i in range(n)], unit="ms", utc=True),
             "open": opens,
-            "high": [max(o, c) for o, c in zip(opens, closes)],
-            "low": [min(o, c) for o, c in zip(opens, closes)],
+            "high": [max(o, c) for o, c in zip(opens, closes, strict=False)],
+            "low": [min(o, c) for o, c in zip(opens, closes, strict=False)],
             "close": closes,
         }
     )

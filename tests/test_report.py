@@ -12,7 +12,9 @@ T0 = 1_700_000_040_000
 
 def synthetic_rows(n: int) -> list[list[str]]:
     """Newest-first rows with a down-up-down price path, one duplicate and one broken bar."""
-    prices = np.concatenate([np.linspace(100, 90, n // 3), np.linspace(90, 110, n // 3), np.linspace(110, 95, n - 2 * (n // 3))])
+    prices = np.concatenate(
+        [np.linspace(100, 90, n // 3), np.linspace(90, 110, n // 3), np.linspace(110, 95, n - 2 * (n // 3))]
+    )
     rows = [
         [str(T0 + i * BAR_MS), f"{p:.4f}", f"{p + 0.5:.4f}", f"{p - 0.5:.4f}", f"{p:.4f}", "1", "1"]
         for i, p in enumerate(prices)
