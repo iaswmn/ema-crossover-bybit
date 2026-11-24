@@ -112,14 +112,16 @@ def clean_klines(rows: list[list[str]], server_ms: int) -> tuple[pd.DataFrame, C
     """Turn raw Bybit rows into a clean, ascending OHLC frame.
 
     What is done and why:
-    * Unparseable rows (wrong length, non-numeric fields) are dropped: there is
-      no way to trust or repair them.
-    * Duplicates by start time are dropped keeping the FIRST occurrence. Bybit
-      lists newest first, so the first copy is the latest snapshot of the bar.
+    * Unparseable rows (not a list, wrong length, non-numeric fields) are
+      dropped: there is no way to trust or repair them.
+    * Broken bars are dropped: non-positive prices, high < low, open/close
+      outside [low, high], or a start time not on a minute boundary. This runs
+      before de-duplication so a broken copy cannot replace a valid one.
+    * Duplicates by start time are dropped keeping the first occurrence. Copies
+      of a closed minute within one response are expected to be identical; if
+      they are not, there is no reliable way to choose, so the order is kept.
     * The still-forming bar (start + 1 min > server time) is dropped: its close
       is not final, and a signal on it would repaint (look-ahead).
-    * Broken bars are dropped: non-positive prices, high < low, open/close
-      outside [low, high], or a start time not on a minute boundary.
     * Rows are sorted ascending: Bybit returns them newest first, while EMA and
       crossover logic needs chronological order.
     * Missing minutes are reported but NOT filled. TradingView does not draw
@@ -138,14 +140,8 @@ def clean_klines(rows: list[list[str]], server_ms: int) -> tuple[pd.DataFrame, C
     unparseable = raw - len(df)
     df = df.astype({"start_ms": "int64"})
 
-    before = len(df)
-    df = df.drop_duplicates(subset="start_ms", keep="first")
-    duplicates = before - len(df)
-
-    before = len(df)
-    df = df[df["start_ms"] + BAR_MS <= server_ms]
-    unclosed = before - len(df)
-
+    # Broken bars go first, so a broken copy of a minute can never win the
+    # de-duplication against a valid copy of the same minute.
     is_broken = (
         (df[PRICE_COLUMNS] <= 0).any(axis=1)
         | (df["high"] < df["low"])
@@ -155,6 +151,14 @@ def clean_klines(rows: list[list[str]], server_ms: int) -> tuple[pd.DataFrame, C
     )
     broken = int(is_broken.sum())
     df = df[~is_broken]
+
+    before = len(df)
+    df = df.drop_duplicates(subset="start_ms", keep="first")
+    duplicates = before - len(df)
+
+    before = len(df)
+    df = df[df["start_ms"] + BAR_MS <= server_ms]
+    unclosed = before - len(df)
 
     df = df.sort_values("start_ms").reset_index(drop=True)
     df["time"] = pd.to_datetime(df["start_ms"], unit="ms", utc=True)

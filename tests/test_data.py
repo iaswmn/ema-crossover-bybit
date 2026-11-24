@@ -33,6 +33,13 @@ class TestCleanKlines:
         assert len(df) == 2
         assert df.iloc[-1]["close"] == pytest.approx(100.9)
 
+    def test_broken_copy_does_not_shadow_valid_duplicate(self):
+        broken_copy = kline(1, o=0.0, h=0.0, low=0.0, c=0.0)
+        df, report = clean_klines([broken_copy, kline(1), kline(0)], closed_server_time(1))
+        assert len(df) == 2
+        assert report.broken == 1
+        assert report.duplicates == 0
+
     @pytest.mark.parametrize(
         "bad",
         [
