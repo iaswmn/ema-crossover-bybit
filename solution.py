@@ -219,3 +219,134 @@ def compute_signals(df: pd.DataFrame, fast: int = FAST_LENGTH, slow: int = SLOW_
         },
         index=df.index,
     )
+
+
+# --- Backtest -----------------------------------------------------------------
+POSITION_USDT = 1000.0
+ENTRY_FEE_RATE = 0.001  # 0.1% of the entry notional
+EXIT_FEE_RATE = 0.0018  # 0.18% of the exit notional
+SLIPPAGE_WARN_PCT = 0.5
+
+
+@dataclass(frozen=True)
+class Trade:
+    entry_time: pd.Timestamp
+    entry_price: float
+    signal_entry_close: float
+    exit_time: pd.Timestamp
+    exit_price: float
+    signal_exit_close: float | None  # None when force-closed at the end of data
+    net_pnl_usdt: float
+    net_pnl_pct: float
+    entry_slippage_pct: float
+    exit_slippage_pct: float
+
+    @property
+    def forced_close(self) -> bool:
+        return self.signal_exit_close is None
+
+    @property
+    def has_slippage(self) -> bool:
+        return max(abs(self.entry_slippage_pct), abs(self.exit_slippage_pct)) > SLIPPAGE_WARN_PCT
+
+
+@dataclass(frozen=True)
+class BacktestResult:
+    trades: list[Trade]
+    unexecuted_signals: int  # signals on the last bar: there is no next open
+
+
+@dataclass(frozen=True)
+class _OpenPosition:
+    entry_time: pd.Timestamp
+    entry_price: float
+    signal_close: float
+
+
+def _slippage_pct(executed: float, signal_close: float) -> float:
+    return (executed / signal_close - 1.0) * 100.0
+
+
+def _net_pnl(entry_price: float, exit_price: float) -> tuple[float, float]:
+    """Net PnL in USDT and % of the position size, after both fees.
+
+    The position size (1000 USDT) buys ``1000 / entry_price`` coins; the entry
+    fee is charged on top of it, the exit fee on the actual exit notional.
+    """
+    qty = POSITION_USDT / entry_price
+    exit_value = qty * exit_price
+    fees = POSITION_USDT * ENTRY_FEE_RATE + exit_value * EXIT_FEE_RATE
+    pnl = exit_value - POSITION_USDT - fees
+    return pnl, pnl / POSITION_USDT * 100.0
+
+
+def _close(position: _OpenPosition, exit_time, exit_price: float, signal_close: float | None) -> Trade:
+    pnl_usdt, pnl_pct = _net_pnl(position.entry_price, exit_price)
+    return Trade(
+        entry_time=position.entry_time,
+        entry_price=position.entry_price,
+        signal_entry_close=position.signal_close,
+        exit_time=exit_time,
+        exit_price=exit_price,
+        signal_exit_close=signal_close,
+        net_pnl_usdt=pnl_usdt,
+        net_pnl_pct=pnl_pct,
+        entry_slippage_pct=_slippage_pct(position.entry_price, position.signal_close),
+        exit_slippage_pct=0.0 if signal_close is None else _slippage_pct(exit_price, signal_close),
+    )
+
+
+def backtest(bars: pd.DataFrame, signals: pd.DataFrame) -> BacktestResult:
+    """Long-only spot backtest without look-ahead.
+
+    A signal is known only after bar T closes, so the order fills at the OPEN
+    of bar T+1 (the next real bar if there is a gap). A signal on the very last
+    bar cannot be executed and is counted separately. A position still open at
+    the end of data is force-closed at the last close.
+    """
+    times = bars["time"].tolist()
+    opens = bars["open"].to_numpy(dtype=float)
+    closes = bars["close"].to_numpy(dtype=float)
+    buys = signals["buy"].to_numpy(dtype=bool)
+    sells = signals["sell"].to_numpy(dtype=bool)
+    last = len(bars) - 1
+
+    trades: list[Trade] = []
+    position: _OpenPosition | None = None
+    unexecuted = 0
+    for i in range(len(bars)):
+        wants_entry = position is None and buys[i]
+        wants_exit = position is not None and sells[i]
+        if not (wants_entry or wants_exit):
+            continue
+        if i == last:
+            unexecuted += 1
+            continue
+        if wants_entry:
+            position = _OpenPosition(times[i + 1], opens[i + 1], closes[i])
+        else:
+            trades = [*trades, _close(position, times[i + 1], opens[i + 1], closes[i])]
+            position = None
+
+    if position is not None:
+        close_time = times[last] + pd.Timedelta(milliseconds=BAR_MS)
+        trades = [*trades, _close(position, close_time, closes[last], None)]
+    return BacktestResult(trades=trades, unexecuted_signals=unexecuted)
+
+
+@dataclass(frozen=True)
+class Stats:
+    trades: int
+    wins: int
+    winrate_pct: float
+    total_pnl_usdt: float
+
+
+def summarize(trades: list[Trade]) -> Stats:
+    wins = sum(1 for t in trades if t.net_pnl_usdt > 0)
+    return Stats(
+        trades=len(trades),
+        wins=wins,
+        winrate_pct=wins / len(trades) * 100.0 if trades else 0.0,
+        total_pnl_usdt=sum(t.net_pnl_usdt for t in trades),
+    )
